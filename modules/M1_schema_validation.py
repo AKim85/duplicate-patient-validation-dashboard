@@ -11,6 +11,7 @@ MVP link:
 
 import pandas as pd
 from pathlib import Path
+from openpyxl.styles import Font, PatternFill
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -110,25 +111,10 @@ for col, count in non_numeric_counts.items():
 summary_df = pd.DataFrame(summary_rows)
 
 # ---------------------------------------------------------------------
-# Write output (without modifying source data)
+# Write output (formatted for readability)
 # ---------------------------------------------------------------------
 
 with pd.ExcelWriter(
-    FILE_PATH,
-    engine="openpyxl",
-    mode="a",
-    if_sheet_exists="replace"
-) as writer:
-    summary_df.to_excel(
-        writer,
-        sheet_name=OUTPUT_SHEET,
-        index=False
-    )
-
-    worksheet = writer.book[OUTPUT_SHEET]
-    worksheet.insert_rows(1)
-    worksheet["A1"] = "STATUS"
-    worksheet["B1"] = status
 
 # ---------------------------------------------------------------------
 # End of Module 1
