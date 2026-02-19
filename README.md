@@ -1,2 +1,6 @@
 # duplicate-patient-validation-dashboard
-I‑assisted duplicate patient validation dashboard for the NWL SH EHR migration. This repository contains Copilot‑generated Python logic used to validate and analyse supplier data, with Excel acting as the operational interface. No patient data is included.
+DT402 Software Development Portfolio
+AI‑assisted duplicate patient validation dashboard for the NWL SH EHR migration.
+This repository contains Copilot‑generated Python logiic only to validate and analyse supplier data.
+Excel acting as the operational interface.
+No patient data is included.
