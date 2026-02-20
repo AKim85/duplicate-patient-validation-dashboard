@@ -168,7 +168,6 @@ wb.save(SOURCE_FILE)
 # =====================================================
 if IN_COLAB:
     display(pivot)
-    files.download(SOURCE_FILE)
 
 
 # -----------------------------------------------------
