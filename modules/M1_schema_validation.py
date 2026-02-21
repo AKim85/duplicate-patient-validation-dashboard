@@ -1,180 +1,215 @@
-"""
-Module 1 — Load & Validate Schema (Data Readiness)
+# modules/M1_schema_validation.py
+# Module 1: Data Readiness (Schema Validation)
+# Writes results to Excel tab: M1_SchemaValidation
+# Returns: (df, col_map, halt, schema_results, sheet_used)
 
-Purpose:
-    Validate the structure and basic data types of the supplier-provided
-    Duplicate Patient Summary before any downstream processing.
-
-MVP link:
-    MVP #1–2 (load data; schema and type validation)
-"""
-
+import re
+import numpy as np
 import pandas as pd
-from pathlib import Path
-from openpyxl.styles import Font, PatternFill, Border, Side
 
-# -----------------------------------------------------
-# Configuration
-# -----------------------------------------------------
+from openpyxl.utils.dataframe import dataframe_to_rows
 
-FILE_PATH = Path("DUPLICATE_PATIENTS.xlsx")
-INPUT_SHEET = "Input_DuplicatePatientSummary"
-OUTPUT_SHEET = "M1_SchemaValidation"
 
-EXPECTED_COLUMNS = [
-    "ID 1",
-    "ID 2",
-    "Patient 1",
-    "Patient 2",
-    "Identifier 1",
-    "Identifier 2",
-    "Recent Edit",
-    "Matches",
-    "Forename Match",
-    "Surname Match",
-    "Soundex Match",
-    "Sex Match",
-    "DOB Match",
-    "PostCode Match",
-    "Address Match",
-]
+# -------------------------
+# Helpers
+# -------------------------
 
-# -----------------------------------------------------
-# Load input
-# -----------------------------------------------------
+def _normalize_colname(c: str) -> str:
+    return re.sub(r"\s+", " ", str(c).strip())
 
-xls = pd.ExcelFile(FILE_PATH)
+def _find_col(cols, candidates):
+    """Case-insensitive, whitespace-tolerant column lookup."""
+    norm_map = {_normalize_colname(c).lower(): c for c in cols}
+    for cand in candidates:
+        key = _normalize_colname(cand).lower()
+        if key in norm_map:
+            return norm_map[key]
 
-if INPUT_SHEET not in xls.sheet_names:
-    raise ValueError(
-        f"Expected sheet '{INPUT_SHEET}' not found. "
-        f"Available sheets: {xls.sheet_names}"
-    )
+    # allow minor variants: remove spaces
+    stripped_map = {re.sub(r"\s+", "", _normalize_colname(c)).lower(): c for c in cols}
+    for cand in candidates:
+        key = re.sub(r"\s+", "", _normalize_colname(cand)).lower()
+        if key in stripped_map:
+            return stripped_map[key]
 
-df = pd.read_excel(FILE_PATH, sheet_name=INPUT_SHEET)
+    return None
 
-# -----------------------------------------------------
-# Validation checks
-# -----------------------------------------------------
+def _is_int_like(x):
+    if pd.isna(x):
+        return False
+    if isinstance(x, (int, np.integer)):
+        return True
+    if isinstance(x, (float, np.floating)):
+        return float(x).is_integer()
+    if isinstance(x, str):
+        return x.strip().isdigit()
+    return False
 
-# 1. Schema validation
-missing_columns = [c for c in EXPECTED_COLUMNS if c not in df.columns]
+def _to_int(x):
+    if isinstance(x, (int, np.integer)):
+        return int(x)
+    if isinstance(x, (float, np.floating)):
+        return int(round(float(x)))
+    if isinstance(x, str) and x.strip().isdigit():
+        return int(x.strip())
+    return None
 
-# 2. Date parsing
-invalid_dates = 0
-if "Recent Edit" in df.columns:
-    parsed_dates = pd.to_datetime(df["Recent Edit"], errors="coerce")
-    invalid_dates = parsed_dates.isna().sum()
+def _interpret_match_value(v):
+    """Return True for Match, False for Mismatch, np.nan for unknown."""
+    if pd.isna(v):
+        return np.nan
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
 
-# 3. Numeric checks
-numeric_columns = [
-    c for c in EXPECTED_COLUMNS if c.endswith("Match") or c == "Matches"
-]
+    # numeric 0/1
+    if isinstance(v, (int, np.integer)):
+        if v in (0, 1):
+            return bool(v)
+        return np.nan
+    if isinstance(v, (float, np.floating)):
+        if float(v).is_integer() and int(v) in (0, 1):
+            return bool(int(v))
+        return np.nan
 
-non_numeric_counts = {}
-for col in numeric_columns:
-    if col in df.columns:
-        coerced = pd.to_numeric(df[col], errors="coerce")
-        non_numeric_counts[col] = coerced.isna().sum()
+    s = str(v).strip().lower()
+    if s in ("match", "matched", "m", "true", "t", "yes", "y", "1"):
+        return True
+    if s in ("mismatch", "not match", "notmatch", "mm", "false", "f", "no", "n", "0"):
+        return False
+    return np.nan
 
-# -----------------------------------------------------
-# Determine PASS / FAIL
-# -----------------------------------------------------
+def _valid_indicator_series(ser: pd.Series) -> bool:
+    vals = ser.dropna().map(_interpret_match_value)
+    return vals.notna().all()
 
-status = "PASS" if len(missing_columns) == 0 else "FAIL"
+def _write_df_to_sheet(ws, df: pd.DataFrame, index=False, header=True):
+    """Clear a worksheet and write a dataframe to it."""
+    ws.delete_rows(1, ws.max_row)
+    for r_idx, row in enumerate(dataframe_to_rows(df, index=index, header=header), start=1):
+        for c_idx, value in enumerate(row, start=1):
+            ws.cell(row=r_idx, column=c_idx, value=value)
 
-# -----------------------------------------------------
-# Build validation summary
-# -----------------------------------------------------
 
-summary_rows = [
-    {
-        "Check": "Missing columns",
-        "Result": len(missing_columns),
-        "Details": ", ".join(missing_columns),
-    },
-    {
-        "Check": "Invalid dates (Recent Edit)",
-        "Result": invalid_dates,
-        "Details": "",
-    },
-]
+# -------------------------
+# Main entry
+# -------------------------
 
-for col, count in non_numeric_counts.items():
-    summary_rows.append(
-        {
-            "Check": f"Non-numeric values in {col}",
-            "Result": count,
-            "Details": "",
-        }
-    )
+def run(src_path: str, wb_out, sheet_name: str = None):
+    """
+    Validate schema for DuplicatePatientsSummary.
+    Writes a Pass/Fail report to tab 'M1_SchemaValidation' and returns:
+      df, col_map, halt, schema_results, sheet_used
+    """
 
-summary_df = pd.DataFrame(summary_rows)
+    # Detect sheet if not provided
+    if sheet_name is None:
+        candidates = ["DuplicatePatientsSummary", "DuplicatePatientSummary", "DuplicatePatients", "DuplicatePatients Summary"]
+        sheet_name = next((s for s in candidates if s in wb_out.sheetnames), None)
+        if sheet_name is None:
+            # If wb_out came from copy of source, sheetnames should include it.
+            raise ValueError(f"Could not find DuplicatePatientsSummary-like sheet. Found: {wb_out.sheetnames}")
 
-# -----------------------------------------------------
-# Write output to Excel (formatted)
-# -----------------------------------------------------
+    sheet_used = sheet_name
 
-with pd.ExcelWriter(
-    FILE_PATH,
-    engine="openpyxl",
-    mode="a",
-    if_sheet_exists="replace",
-) as writer:
-    summary_df.to_excel(
-        writer,
-        sheet_name=OUTPUT_SHEET,
-        index=False,
-    )
+    # Read header row only
+    cols = pd.read_excel(src_path, sheet_name=sheet_used, nrows=0, engine="openpyxl").columns.tolist()
 
-    ws = writer.book[OUTPUT_SHEET]
+    # Map required columns (tolerant to minor naming differences)
+    col_patient1 = _find_col(cols, ["Patient 1", "Patient1"])
+    col_patient2 = _find_col(cols, ["Patient 2", "Patient2"])
+    col_score    = _find_col(cols, ["MatchScore", "Match Score", "Score"])
 
-    # Insert STATUS row
-    ws.insert_rows(1)
-    ws["A1"] = "STATUS"
-    ws["B1"] = status
+    col_forename = _find_col(cols, ["Forename", "Forename Match", "Forename_Match"])
+    col_surname  = _find_col(cols, ["Surname", "Surname Match", "Surname_Match"])
+    col_soundex  = _find_col(cols, ["Soundex", "Soundex Match", "Soundex_Match"])
+    col_sex      = _find_col(cols, ["Sex", "Sex Match", "Sex_Match"])
+    col_dob      = _find_col(cols, ["DOB", "Date of Birth", "DOB Match", "DOB_Match"])
+    col_postcode = _find_col(cols, ["Poscode", "PostCode", "Post Code", "Postcode", "PostCode Match", "PostCode_Match", "Postcode Match"])
+    col_address  = _find_col(cols, ["Address", "Address Match", "Address_Match"])
 
-    # Style STATUS cell
-    ws["B1"].font = Font(bold=True)
+    col_map = {
+        "Patient 1": col_patient1,
+        "Patient 2": col_patient2,
+        "MatchScore": col_score,
+        "Forename": col_forename,
+        "Surname": col_surname,
+        "Soundex": col_soundex,
+        "Sex": col_sex,
+        "DOB": col_dob,
+        "PostCode/Poscode": col_postcode,
+        "Address": col_address,
+    }
 
-    if status == "PASS":
-        ws["B1"].fill = PatternFill(
-            start_color="C6EFCE",
-            end_color="C6EFCE",
-            fill_type="solid",
-        )
-        ws["B1"].font = Font(bold=True, color="008000")
+    # Build checks
+    checks = []
+    for k, v in col_map.items():
+        checks.append({
+            "Check": f"Column present: {k}",
+            "Result": "Pass" if v is not None else "Fail",
+            "Details": "" if v is not None else "Missing"
+        })
+
+    halt = any(c["Result"] == "Fail" for c in checks)
+
+    # Read only available columns
+    usecols = [c for c in col_map.values() if c is not None]
+    df = pd.read_excel(src_path, sheet_name=sheet_used, engine="openpyxl", usecols=usecols)
+
+    # MatchScore checks
+    if col_score is not None:
+        s = df[col_score]
+        all_int_like = s.map(_is_int_like).all()
+        in_range = s.map(lambda x: (_to_int(x) is not None) and (4 <= _to_int(x) <= 7)).all()
+
+        checks.append({
+            "Check": "'MatchScore' is integer-like",
+            "Result": "Pass" if all_int_like else "Fail",
+            "Details": "" if all_int_like else "Non-integer values present"
+        })
+        checks.append({
+            "Check": "'MatchScore' within 4-7",
+            "Result": "Pass" if in_range else "Fail",
+            "Details": "" if in_range else "Out-of-range values present"
+        })
+
+        if (not all_int_like) or (not in_range):
+            halt = True
+
+    # Indicator columns checks
+    indicator_cols = {
+        "Forename": col_forename,
+        "Surname": col_surname,
+        "Soundex": col_soundex,
+        "Sex": col_sex,
+        "DOB": col_dob,
+        "PostCode/Poscode": col_postcode,
+        "Address": col_address,
+    }
+
+    for label, col in indicator_cols.items():
+        if col is None:
+            continue
+        ok = _valid_indicator_series(df[col])
+        checks.append({
+            "Check": f"Indicator valid (Match/Mismatch or boolean/0-1): {label}",
+            "Result": "Pass" if ok else "Fail",
+            "Details": "" if ok else "Unexpected values present"
+        })
+        if not ok:
+            halt = True
+
+    schema_results = pd.DataFrame(checks)
+
+    # Ensure destination tab exists
+    if "M1_SchemaValidation" in wb_out.sheetnames:
+        ws = wb_out["M1_SchemaValidation"]
     else:
-        ws["B1"].fill = PatternFill(
-            start_color="FFC7CE",
-            end_color="FFC7CE",
-            fill_type="solid",
-        )
-        ws["B1"].font = Font(bold=True, color="FF0000")
+        ws = wb_out.create_sheet("M1_SchemaValidation")
 
-    # Border around STATUS
-    ws["B1"].border = Border(
-        left=Side(style="thin"),
-        right=Side(style="thin"),
-        top=Side(style="thin"),
-        bottom=Side(style="thin"),
-    )
+    _write_df_to_sheet(ws, schema_results, index=False)
 
-    # Bold header row (Check / Result / Details)
-    for cell in ws[2]:
-        cell.font = Font(bold=True)
+    # Add a clear halt message at bottom if required
+    if halt:
+        ws.cell(row=schema_results.shape[0] + 3, column=1, value="Processing halted due to critical schema validation failures.")
 
-    # Auto-size column A
-    max_length = max(len(str(cell.value)) for cell in ws["A"] if cell.value)
-    ws.column_dimensions["A"].width = max_length + 5
-
-# -----------------------------------------------------
-# Preview output inside Colab (data only)
-# -----------------------------------------------------
-
-preview_df = pd.read_excel(FILE_PATH, sheet_name=OUTPUT_SHEET)
-preview_df
-
-# -----------------------------------------------------
-# End of Module 1
-# -----------------------------------------------------
+    return df, col_map, halt, schema_results, sheet_used
